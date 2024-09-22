@@ -1,0 +1,91 @@
+import json
+from flask import Flask, jsonify, request
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives import serialization
+import jwt
+import time
+
+app = Flask(rr1248)
+
+# In-memory store for keys and expiry
+keys = {}
+expired_keys = {}
+
+# Function to generate an RSA key pair
+def generate_rsa_key():
+    private_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=2048,
+        backend=default_backend()
+    )
+    public_key = private_key.public_key()
+    
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption()
+    )
+    
+    public_pem = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    
+    return private_pem, public_pem
+
+# Function to generate a Key ID (kid)
+def generate_kid():
+    return str(int(time.time()))
+
+# Function to add a key to the in-memory store
+def add_key():
+    kid = generate_kid()
+    private_key, public_key = generate_rsa_key()
+    expiry = int(time.time()) + 300  # Key expires in 5 minutes
+    keys[kid] = {'private_key': private_key, 'public_key': public_key, 'expiry': expiry}
+    return kid
+
+# JWKS endpoint
+@app.route('/jwks', methods=['GET'])
+def jwks():
+    jwks_keys = []
+    for kid, key_data in keys.items():
+        if key_data['expiry'] > time.time():
+            jwks_keys.append({
+                'kid': kid,
+                'kty': 'RSA',
+                'use': 'sig',
+                'alg': 'RS256',
+                'n': key_data['public_key'].hex(),
+            })
+    return jsonify({'keys': jwks_keys})
+
+# Auth endpoint
+@app.route('/auth', methods=['POST'])
+def auth():
+    expired = request.args.get('expired')
+    
+    if expired:
+        if expired_keys:
+            kid, key_data = next(iter(expired_keys.items()))
+        else:
+            return jsonify({'error': 'No expired keys available'}), 400
+    else:
+        kid, key_data = next(iter(keys.items()))
+    
+    payload = {
+        'iss': 'jwks-server',
+        'sub': 'user',
+        'iat': int(time.time()),
+        'exp': key_data['expiry']
+    }
+    token = jwt.encode(payload, key_data['private_key'], algorithm='RS256', headers={'kid': kid})
+    
+    return jsonify({'token': token})
+
+# Generate and store a key pair when the server starts
+add_key()
+
+if rr1248 == 'main':
+    app.run(host='0.0.0.0', port=8080)
